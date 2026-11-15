@@ -74,3 +74,14 @@ class XMLResourceOSError(XMLResourceError, OSError):
     Raised when an XMLResource calls a system function that returns a system-related error,
     including I/O operations.
     """
+
+
+class XMLSchemaBaseURLError(XMLSchemaValueError):
+    """
+    Raised when a relative reference has to be resolved from a source that has
+    no base URL of its own (e.g. an in-memory text/Element source) and no base
+    URL was explicitly provided. Resolving such a reference against the process
+    working directory would make the loading result dependent on the working
+    directory and not reproducible across nodes, so the missing base is reported
+    explicitly instead of being silently substituted.
+    """

@@ -9,7 +9,8 @@
 #
 from . import translation
 from . import limits
-from .exceptions import XMLSchemaException, XMLResourceError, XMLSchemaNamespaceError
+from .exceptions import XMLSchemaException, XMLResourceError, XMLSchemaNamespaceError, \
+    XMLSchemaBaseURLError
 from .resources import fetch_resource, fetch_namespaces, fetch_schema_locations, \
     fetch_schema, XMLResource
 from .xpath import ElementPathMixin, ElementSelector, ElementPathSelector
@@ -22,7 +23,7 @@ from .documents import validate, is_valid, iter_errors, iter_decode, \
 from .exports import download_schemas
 from .loaders import SchemaLoader, LocationSchemaLoader, SafeSchemaLoader
 from .utils.etree import etree_tostring
-from .utils.urls import normalize_url, normalize_locations
+from .utils.urls import normalize_url, normalize_locations, resolve_relative_url
 
 from .validators import (
     XMLSchemaValidatorError, XMLSchemaParseError, XMLSchemaNotBuiltError,
@@ -42,8 +43,9 @@ __status__ = "Production/Stable"
 
 __all__ = [
     'limits', 'translation', 'XMLSchemaException', 'XMLResourceError',
-    'XMLSchemaNamespaceError', 'etree_tostring', 'normalize_url',
-    'normalize_locations', 'fetch_resource', 'fetch_namespaces',
+    'XMLSchemaNamespaceError', 'XMLSchemaBaseURLError', 'etree_tostring',
+    'normalize_url', 'normalize_locations', 'resolve_relative_url',
+    'fetch_resource', 'fetch_namespaces',
     'fetch_schema_locations', 'fetch_schema',
     'XMLResource', 'ElementPathMixin', 'ElementData', 'XMLSchemaConverter',
     'UnorderedConverter', 'ParkerConverter', 'BadgerFishConverter', 'GDataConverter',

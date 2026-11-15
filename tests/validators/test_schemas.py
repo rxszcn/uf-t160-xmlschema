@@ -15,6 +15,7 @@ import warnings
 import pathlib
 import pickle
 import os
+import tempfile
 from textwrap import dedent
 from xml.etree.ElementTree import Element
 
@@ -156,18 +157,64 @@ class TestXMLSchema10(XsdValidatorTestCase):
         self.check_schema('<xs:group name="empty"><xs:annotation/></xs:group>', XMLSchemaParseError)
 
     def test_wrong_includes_and_imports(self):
+        # In-memory text sources have no URL of their own: relative schema
+        # locations require an explicit base URL instead of silently resolving
+        # against the process working directory.
+        schema_text = """
+        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="ns">
+            <xs:include schemaLocation="example.xsd" />
+            <xs:import schemaLocation="example.xsd" />
+            <xs:redefine schemaLocation="example.xsd"/>
+            <xs:import namespace="http://missing.example.test/" />
+            <xs:import/>
+        </xs:schema>
+        """
 
+        # strict mode: the three relative references fail with an explicit
+        # parse error naming the missing relative part (no cwd drift).
+        with self.assertRaises(XMLSchemaParseError) as ctx:
+            self.check_schema(schema_text)
+        message = str(ctx.exception)
+        self.assertIn('example.xsd', message)
+        self.assertIn('base URL', message)
+
+        # lax mode: the base-missing failures are collected as parse errors;
+        # imports without any resolvable location produce no warning (the
+        # established behavior when no fallback location is available).
         with warnings.catch_warnings(record=True) as context:
             warnings.simplefilter("always")
-            self.check_schema("""
-            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="ns">
+            schema = self.check_schema(schema_text, validation='lax')
+
+        base_errors = [e for e in schema.errors
+                       if isinstance(e, XMLSchemaParseError) and 'base URL' in str(e)]
+        self.assertEqual(len(base_errors), 3)
+        for err in base_errors:
+            self.assertIn('example.xsd', str(err))
+        self.assertEqual(context, [])
+
+    def test_wrong_includes_and_imports_from_file_source(self):
+        # For file-path sources the established base semantics are preserved
+        # verbatim: relative parts resolve against the file's directory and
+        # inaccessible locations surface as include/import/redefine warnings.
+        schema_text = dedent("""\
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                       targetNamespace="ns">
                 <xs:include schemaLocation="example.xsd" />
                 <xs:import schemaLocation="example.xsd" />
                 <xs:redefine schemaLocation="example.xsd"/>
                 <xs:import namespace="http://missing.example.test/" />
                 <xs:import/>
             </xs:schema>
-            """)
+        """)
+
+        with tempfile.TemporaryDirectory() as dirname:
+            schema_file = pathlib.Path(dirname).joinpath('main.xsd')
+            schema_file.write_text(schema_text, encoding='utf-8')
+
+            with warnings.catch_warnings(record=True) as context:
+                warnings.simplefilter("always")
+                self.schema_class(str(schema_file))
+
             self.assertEqual(len(context), 3, "Wrong number of include/import warnings")
             self.assertEqual(context[0].category, XMLSchemaIncludeWarning)
             self.assertEqual(context[1].category, XMLSchemaImportWarning)

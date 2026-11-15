@@ -32,7 +32,7 @@ from xmlschema.utils.misc import iter_class_slots
 from xmlschema.utils.streams import is_file_object
 from xmlschema.utils.qnames import update_namespaces, get_namespace_map
 from xmlschema.utils.urls import is_url, is_remote_url, is_local_url, normalize_url, \
-    normalize_locations
+    normalize_locations, resolve_relative_url
 from xmlschema.xpath import ElementSelector
 from xmlschema.arguments import Argument, SourceArgument, BaseUrlOption, \
     AllowOption, BlockOption, DefuseOption, PositiveIntOption, UriMapperOption, \
@@ -231,6 +231,17 @@ class XMLResource(XMLResourceLoader):
         return None if self.url is None else os.path.basename(unquote(self.url))
 
     @property
+    def has_own_url(self) -> bool:
+        """
+        `True` if the resource is created from a path/URL source and therefore has
+        a base URL of its own. In-memory sources (XML text/bytes, streams without a
+        URL, Element/ElementTree) return `False`: their relative references require
+        an explicit *base_url* instead of falling back to the working directory.
+        """
+        # During __init__ self.url may not be assigned yet, so also check the source.
+        return self.url is not None or is_url(self._source)
+
+    @property
     def filepath(self) -> Optional[str]:
         """
         The resource filepath if the instance is created from a local file, `None` otherwise.
@@ -300,7 +311,9 @@ class XMLResource(XMLResourceLoader):
         elif callable(self._uri_mapper):
             uri = self._uri_mapper(uri)
 
-        return normalize_url(uri, self._base_url)
+        if self.has_own_url:
+            return normalize_url(uri, self._base_url)
+        return resolve_relative_url(uri, self._base_url)
 
     def match_location(self, location: str) -> bool:
         """Matches the location with the URL the XML resource. URL schemes are compared """
@@ -801,15 +814,26 @@ class XMLResource(XMLResourceLoader):
         else:
             location_hints = normalize_locations(locations, self.base_url)
 
+        if self.has_own_url:
+            # Path/URL source: the source URL provides the base, keep the
+            # established normalization semantics (including its cwd fallback).
+            def resolve(hint: str) -> str:
+                return normalize_url(hint, self.base_url)
+        else:
+            # In-memory source: no implicit base, relative hints require an
+            # explicit base URL instead of the process working directory.
+            def resolve(hint: str) -> str:
+                return resolve_relative_url(hint, self.base_url)
+
         if root_only:
             location_hints.extend([
-                (ns, normalize_url(url, self.base_url))
+                (ns, resolve(url))
                 for ns, url in iter_schema_location_hints(self.root)
             ])
         else:
             try:
                 location_hints.extend([
-                    (ns, normalize_url(url, self.base_url))
+                    (ns, resolve(url))
                     for ns, url in self.iter_location_hints()
                 ])
             except (ElementTree.ParseError, UnicodeEncodeError):

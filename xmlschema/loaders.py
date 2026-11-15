@@ -16,9 +16,10 @@ from typing import Any, Optional, TYPE_CHECKING, cast
 
 from xmlschema.aliases import SchemaType, SourceArgType, LocationsType
 from xmlschema.exceptions import XMLSchemaTypeError, XMLSchemaValueError, \
-    XMLResourceBlocked, XMLResourceForbidden, XMLResourceError, XMLResourceParseError
+    XMLResourceBlocked, XMLResourceForbidden, XMLResourceError, XMLResourceParseError, \
+    XMLSchemaBaseURLError
 from xmlschema.translation import gettext as _
-from xmlschema.utils.urls import normalize_url
+from xmlschema.utils.urls import normalize_url, resolve_relative_url
 from xmlschema.utils.etree import iter_schema_declarations
 from xmlschema.arguments import Option, validate_subclass
 from xmlschema.locations import NamespaceResourcesMap, get_locations, \
@@ -34,6 +35,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger('xmlschema')
 base_url_attribute = attrgetter('name')
+
+
+def resolve_schema_location(location: str,
+                            base_url: Optional[str],
+                            source_url: Optional[str]) -> str:
+    """
+    Normalize a schema location hint against the owning schema's base URL.
+
+    When the owning schema has a URL of its own (file path or URL source) the
+    established *normalize_url()* semantics are preserved verbatim, including
+    its working-directory fallback. When the schema is loaded from an in-memory
+    source (no URL) only an explicit base URL is accepted: a missing base raises
+    an `XMLSchemaBaseURLError` instead of silently resolving against the process
+    working directory, which would make loading results node-dependent.
+    """
+    if source_url is None:
+        return resolve_relative_url(location, base_url)
+    return normalize_url(location, base_url)
 
 
 class SchemaLoader:
@@ -110,9 +129,26 @@ class SchemaLoader:
                     continue
 
                 schema.imported_namespaces.append(namespace)
-                url = normalize_url(location, base_url) if location else None
-                if self.is_missing(namespace, location, base_url):
-                    self.import_namespace(schema, namespace, url)
+                base_error: Optional[XMLSchemaBaseURLError] = None
+                if location:
+                    try:
+                        url: Optional[str] = resolve_schema_location(
+                            location, base_url, schema.url
+                        )
+                    except XMLSchemaBaseURLError as err:
+                        # In-memory source without a base URL: keep the unresolved
+                        # relative location so the namespace can still be satisfied
+                        # by fallback/registered locations; if none resolves, the
+                        # explicit base error is surfaced by import_namespace().
+                        base_error = err
+                        url = None
+                else:
+                    url = None
+
+                if self.is_missing(namespace, location, base_url, schema.url):
+                    self.import_namespace(
+                        schema, namespace, url, base_error=base_error
+                    )
 
             elif location is not None:
                 # Process xs:include/xs:redefine/xs:override only if it has a
@@ -122,7 +158,23 @@ class SchemaLoader:
                 operation = elem.tag.split('}')[-1]
                 logger.info("Process xs:%s schema from %s", operation, location)
                 try:
+                    # Resolve up-front so that an in-memory source without a base
+                    # URL gets an explicit error naming the missing relative part,
+                    # instead of a working-directory-dependent resolution attempt.
+                    resolve_schema_location(location, base_url, schema.url)
                     _schema = self.include_schema(schema, location, base_url)
+                except XMLSchemaBaseURLError as err:
+                    # No silent working-directory fallback for in-memory sources:
+                    # report the missing base and the relative part explicitly.
+                    self.missing_locations.add(location)
+                    if elem.tag == nm.XSD_INCLUDE:
+                        msg = _("Include schema failed: {}").format(err)
+                    elif elem.tag == nm.XSD_REDEFINE:
+                        msg = _("Redefine schema failed: {}").format(err)
+                    else:
+                        msg = _("Override schema failed: {}").format(err)
+
+                    schema.parse_error(msg, elem)
                 except OSError as err:
                     # It is not an error if the location fails to resolve:
                     #   https://www.w3.org/TR/2012/REC-xmlschema11-1-20120405/#compound-schema
@@ -181,8 +233,9 @@ class SchemaLoader:
 
     def import_namespace(self, schema: SchemaType,
                          namespace: str,
-                         location: Optional[str] = None) -> None:
-        import_error: Optional[Exception] = None
+                         location: Optional[str] = None,
+                         base_error: Optional[XMLSchemaBaseURLError] = None) -> None:
+        import_error: Optional[Exception] = base_error
         locations = self.get_locations(namespace, location)
 
         for url in locations:
@@ -216,9 +269,18 @@ class SchemaLoader:
                 break
         else:
             if import_error is not None:
-                msg = _("Import of namespace {!r} from {!r} failed: {}.")
-                schema.warnings.append(msg.format(namespace, locations, str(import_error)))
-                warnings.warn(schema.warnings[-1], XMLSchemaImportWarning, stacklevel=4)
+                if isinstance(import_error, XMLSchemaBaseURLError) and not locations:
+                    # No fallback location is registered for the namespace: the
+                    # relative part can't be resolved without an explicit base.
+                    # Surface the explicit base error naming the relative part.
+                    msg = _("import of namespace {!r} failed: {}").format(
+                        namespace, import_error
+                    )
+                    schema.parse_error(msg)
+                else:
+                    msg = _("Import of namespace {!r} from {!r} failed: {}.")
+                    schema.warnings.append(msg.format(namespace, locations, str(import_error)))
+                    warnings.warn(schema.warnings[-1], XMLSchemaImportWarning, stacklevel=4)
 
     def import_schema(self, target_schema: SchemaType,
                       namespace: str,
@@ -358,7 +420,8 @@ class SchemaLoader:
         return namespace in self.namespaces
 
     def is_missing(self, namespace: str, location: Optional[str] = None,
-                   base_url: Optional[str] = None) -> bool:
+                   base_url: Optional[str] = None,
+                   schema_url: Optional[str] = None) -> bool:
         """Returns `True` if the given location hint is missing, `False` otherwise."""
         return namespace not in self.namespaces or \
             all(s.maps is not self.maps for s in self.namespaces[namespace])
@@ -370,13 +433,19 @@ class LocationSchemaLoader(SchemaLoader):
     referred location is not already loaded.
     """
     def is_missing(self, namespace: str, location: Optional[str] = None,
-                   base_url: Optional[str] = None) -> bool:
+                   base_url: Optional[str] = None,
+                   schema_url: Optional[str] = None) -> bool:
         if super().is_missing(namespace):
             return True
         elif location is None:
             return False
         else:
-            url = normalize_url(location, base_url)
+            try:
+                url = resolve_schema_location(location, base_url, schema_url)
+            except XMLSchemaBaseURLError:
+                # In-memory source without a base: the relative location can't
+                # be normalized, defer to the import/fallback resolution path.
+                return True
             return all(not s.source.match_location(url) for s in self.maps.schemas)
 
 
@@ -398,13 +467,19 @@ class SafeSchemaLoader(SchemaLoader):
         self.excluded_locations.clear()
 
     def is_missing(self, namespace: str, location: Optional[str] = None,
-                   base_url: Optional[str] = None) -> bool:
+                   base_url: Optional[str] = None,
+                   schema_url: Optional[str] = None) -> bool:
         if super().is_missing(namespace):
             return True
         elif location is None:
             return False
 
-        url = normalize_url(location, base_url)
+        try:
+            url = resolve_schema_location(location, base_url, schema_url)
+        except XMLSchemaBaseURLError:
+            # In-memory source without a base: the relative location can't be
+            # normalized, defer to the import/fallback resolution path.
+            return True
         if url in self.excluded_locations or \
                 any(s.source.match_location(url) for s in self.maps.schemas):
             return False

@@ -17,7 +17,7 @@ from typing import Optional
 from urllib.parse import urlsplit, urlunsplit, quote, quote_plus, unquote, unquote_plus
 
 from xmlschema.aliases import NormalizedLocationsType, LocationsType
-from xmlschema.exceptions import XMLSchemaValueError
+from xmlschema.exceptions import XMLSchemaValueError, XMLSchemaBaseURLError
 from xmlschema.utils.paths import LocationPath
 
 
@@ -266,6 +266,63 @@ def normalize_url(url: str, base_url: Optional[str] = None,
 
     base_path = LocationPath(os.getcwd())
     return base_path.joinpath(path).normalize().as_uri()
+
+
+def resolve_relative_url(url: str,
+                         base_url: Optional[str] = None,
+                         method: str = 'xml',
+                         keep_relative: bool = False) -> str:
+    """
+    Resolve a relative reference against an *explicit* base URL, for loading
+    sources that don't have a URL of their own (in-memory text/bytes,
+    :class:`io.StringIO`/:class:`io.BytesIO` or Element/ElementTree sources).
+
+    Unlike :func:`normalize_url`, this function never falls back to the process
+    working directory: when *url* is a relative local reference and *base_url*
+    is not provided, an :class:`~xmlschema.exceptions.XMLSchemaBaseURLError` is
+    raised that names the missing relative part, so the loading result does not
+    depend on the current working directory and stays reproducible across
+    loading nodes. Absolute URLs, absolute local paths and remote references
+    are delegated to :func:`normalize_url`, whose established semantics are
+    preserved verbatim.
+
+    :param url: a relative or absolute URL.
+    :param base_url: the explicit reference base URL for resolving *url*, \
+    required when *url* is a relative local reference.
+    :param method: method used to encode query and fragment parts, same as \
+    :func:`normalize_url`.
+    :param keep_relative: same meaning as in :func:`normalize_url`; when set \
+    to `True` a relative reference is kept relative also without a base URL, \
+    i.e. no error is raised.
+    :return: a normalized URL string.
+    :raises XMLSchemaBaseURLError: if *url* is a relative local reference, \
+    *base_url* is `None` and *keep_relative* is `False`.
+    """
+    if base_url is not None or keep_relative:
+        return normalize_url(url, base_url, keep_relative, method)
+
+    stripped = url.lstrip()
+    url_parts = urlsplit(stripped)
+    if not is_local_scheme(url_parts.scheme):
+        # Remote or non-local absolute references don't need a base URL.
+        return normalize_url(url, None, False, method)
+
+    # UNC paths and drive-qualified paths are absolute even without a base.
+    if stripped.startswith(('//', '\\\\')):
+        return normalize_url(url, None, False, method)
+
+    path = LocationPath.from_uri(stripped)
+    if path.is_absolute():
+        return normalize_url(url, None, False, method)
+
+    msg = (
+        f"relative reference {url!r} can't be resolved: the source has no URL "
+        f"of its own and no base URL was provided. Pass an explicit 'base_url' "
+        f"pointing to the directory containing the relative part {url!r} "
+        f"(resolving against the process working directory is not supported "
+        f"for in-memory sources)"
+    )
+    raise XMLSchemaBaseURLError(msg)
 
 
 def location_is_file(url: str) -> bool:

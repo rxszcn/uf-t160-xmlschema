@@ -36,7 +36,8 @@ from xmlschema.utils.etree import is_etree_element, is_lxml_element
 from xmlschema.testing import SKIP_REMOTE_TESTS, XMLSchemaTestCase, run_xmlschema_tests
 from xmlschema.utils.urls import normalize_url
 from xmlschema.exceptions import XMLSchemaTypeError, XMLSchemaValueError, \
-    XMLResourceForbidden, XMLResourceBlocked, XMLResourceOSError
+    XMLResourceForbidden, XMLResourceBlocked, XMLResourceOSError, \
+    XMLSchemaBaseURLError
 from xmlschema.resources import XMLResourceManager, iterfind_parser
 from xmlschema.resources.sax import defuse_xml
 
@@ -1130,23 +1131,40 @@ class TestResources(XMLSchemaTestCase):
         self.check_url(locations[1][1], normalize_url(self.col_xsd_file))
 
         source = StringIO('<a xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
-                          '   xsi:schemaLocation="http://example.com/ns1 /loc1"><b1>'
-                          '  <c1 xsi:schemaLocation="http://example.com/ns2 /loc2"/>'
+                          '   xsi:schemaLocation="http://example.com/ns1 sub/loc1.xsd"><b1>'
+                          '  <c1 xsi:schemaLocation="http://example.com/ns2 loc2.xsd"/>'
                           '  <c2 xmlns:tns2="http://example.com/ns2" x="2"/>'
                           '</b1></a>')
 
         resource = XMLResource(source)
-        locations = resource.get_locations(root_only=False)
+
+        # An in-memory source has no URL of its own: relative location hints
+        # can't be resolved against the process working directory, an explicit
+        # base URL is required (explicit-base semantics).
+        with self.assertRaises(XMLSchemaBaseURLError) as ctx:
+            resource.get_locations(root_only=False)
+        self.assertIn('sub/loc1.xsd', str(ctx.exception))
+        self.assertIn('base_url', str(ctx.exception))
+
+        with self.assertRaises(XMLSchemaBaseURLError):
+            resource.get_locations(root_only=True)
+
+        # With an explicit base URL the hints resolve against it, independently
+        # from the process working directory (reproducible across nodes).
+        base_url = Path(os.path.abspath('spec_dir')).as_uri() + '/'
+        based_resource = XMLResource(source, base_url=base_url)
+        locations = based_resource.get_locations(root_only=False)
         self.assertEqual(len(locations), 2)
         self.assertEqual(locations[0][0], 'http://example.com/ns1')
-        self.assertRegex(locations[0][1], f'file://{DRIVE_REGEX}/loc1')
+        self.assertEqual(locations[0][1], normalize_url('sub/loc1.xsd', base_url))
         self.assertEqual(locations[1][0], 'http://example.com/ns2')
-        self.assertRegex(locations[1][1], f'file://{DRIVE_REGEX}/loc2')
+        self.assertEqual(locations[1][1], normalize_url('loc2.xsd', base_url))
+        self.assertIn('spec_dir', locations[0][1])
 
-        locations = resource.get_locations(root_only=True)
+        locations = based_resource.get_locations(root_only=True)
         self.assertEqual(len(locations), 1)
         self.assertEqual(locations[0][0], 'http://example.com/ns1')
-        self.assertRegex(locations[0][1], f'file://{DRIVE_REGEX}/loc1')
+        self.assertEqual(locations[0][1], normalize_url('sub/loc1.xsd', base_url))
 
     @unittest.skipIf(SKIP_REMOTE_TESTS or platform.system() == 'Windows',
                      "Remote networks are not accessible or avoid SSL "
